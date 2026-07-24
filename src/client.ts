@@ -152,6 +152,16 @@ export class MoonScaleClient {
     return this.bridge.clearExitNode();
   }
 
+  async fetch(url: string): Promise<{ status: number; statusText: string; text(): Promise<string> }> {
+    if (this.closed) throw new Error('MoonScale client is closed');
+    return this.bridge.fetch(url);
+  }
+
+  createTailscaleWebSocket(url: string): unknown {
+    if (this.closed) throw new Error('MoonScale client is closed');
+    return this.bridge.createTailscaleWebSocket(url);
+  }
+
   dialTcp(host: string, port: number): Promise<MoonScaleTcpSocket> {
     return this.dial((callbacks) => this.bridge.dialTcp(host, port, callbacks));
   }

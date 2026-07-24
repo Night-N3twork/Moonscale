@@ -3,7 +3,7 @@ import type { RuntimeBridge, RuntimeConfig, RuntimeModule, RuntimeModuleLoader }
 function isBridge(value: unknown): value is RuntimeBridge {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Record<string, unknown>;
-  return ['run', 'login', 'logout', 'listExitNodes', 'setExitNode', 'clearExitNode', 'exitNode', 'dialTcp', 'dialUdp', 'listenTcp', 'listenUdp'].every((name) => typeof candidate[name] === 'function');
+  return ['run', 'login', 'logout', 'listExitNodes', 'setExitNode', 'clearExitNode', 'exitNode', 'dialTcp', 'dialUdp', 'listenTcp', 'listenUdp', 'createTailscaleWebSocket', 'fetch'].every((name) => typeof candidate[name] === 'function');
 }
 
 export function validateRuntimeModule(module: unknown): RuntimeModule {

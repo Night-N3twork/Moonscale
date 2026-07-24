@@ -15,6 +15,7 @@ function makeBridge(): RuntimeBridge {
     setExitNode: vi.fn(() => Promise.resolve()),
     clearExitNode: vi.fn(() => Promise.resolve()),
     exitNode: vi.fn(),
+    createTailscaleWebSocket: vi.fn(),
   };
 }
 

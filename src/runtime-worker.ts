@@ -76,8 +76,8 @@ function runtimeCallbacks(): RuntimeCallbacks {
   return {
     notifyState: (state) => post({ type: 'event', event: 'state', value: state }),
     notifyNetMap: (netmap) => {
-      post({ type: 'event', event: 'netmap', value: netmap });
       snapshotExitNodes();
+      post({ type: 'event', event: 'netmap', value: netmap });
     },
     notifyBrowseToURL: (url) => post({ type: 'event', event: 'auth-url', value: url }),
     notifyPanicRecover: () => post({ type: 'event', event: 'panic', value: 'MoonScale runtime stopped unexpectedly' }),
@@ -208,8 +208,18 @@ self.onmessage = (event: MessageEvent<Request>) => {
     switch (message.method) {
       case 'login': bridge.login(); respond(message.id); break;
       case 'logout': bridge.logout(); respond(message.id); break;
-      case 'setExitNode': void bridge.setExitNode(message.args[0] as string, message.args[1] as { allowLANAccess?: boolean } | undefined).then(() => { snapshotExitNodes(); respond(message.id); }, () => fail(message.id)); break;
-      case 'clearExitNode': void bridge.clearExitNode().then(() => { snapshotExitNodes(); respond(message.id); }, () => fail(message.id)); break;
+      case 'setExitNode': void bridge.setExitNode(message.args[0] as string, message.args[1] as { allowLANAccess?: boolean } | undefined).then(() => { snapshotExitNodes(); respond(message.id); }, (err) => { console.error('[worker] setExitNode failed:', err); post({ type: 'response', id: message.id, error: String(err) }); }); break;
+      case 'clearExitNode': void bridge.clearExitNode().then(() => { snapshotExitNodes(); respond(message.id); }, (err) => { console.error('[worker] clearExitNode failed:', err); post({ type: 'response', id: message.id, error: String(err) }); }); break;
+      case 'fetch': {
+        const url = message.args[0] as string;
+        bridge.fetch(url).then((result: any) => {
+          if (!result) { fail(message.id); return; }
+          result.text().then((body: string) => {
+            respond(message.id, { status: result.status, statusText: result.statusText, body });
+          }).catch((err: any) => { post({ type: 'response', id: message.id, error: String(err) }); });
+        }).catch((err: any) => { post({ type: 'response', id: message.id, error: String(err) }); });
+        break;
+      }
       case 'dialTcp': dial(message.id, false, message.args[0] as string, message.args[1] as number); break;
       case 'dialUdp': dial(message.id, true, message.args[0] as string, message.args[1] as number); break;
       case 'listenTcp': listen(message.id, false, message.args[0] as string, message.args[1] as number); break;
@@ -219,6 +229,50 @@ self.onmessage = (event: MessageEvent<Request>) => {
       case 'socketClose': sockets.get(message.socketId!)?.close(); sockets.delete(message.socketId!); respond(message.id); break;
       case 'listenerClose': listeners.get(message.listenerId!)?.close(); listeners.delete(message.listenerId!); respond(message.id); break;
       case 'cancel': respond(message.id); break;
+      case 'createTailscaleWebSocket': {
+        const url = message.args[0] as string;
+        const resolvedIP = message.args[1] as string | undefined;
+        try {
+          const ws = bridge.createTailscaleWebSocket(url, resolvedIP ?? '') as any;
+          const wsId = nextStorageID++;
+          (globalThis as any).__tsws ??= new Map();
+          (globalThis as any).__tsws.set(wsId, ws);
+          ws.addEventListener('open', () => {
+            respond(message.id, wsId);
+          });
+          ws.addEventListener('error', () => {
+            console.error('[worker] tswebsocket error for', url);
+            fail(message.id);
+            (globalThis as any).__tsws?.delete(wsId);
+          });
+          ws.addEventListener('message', (ev: any) => {
+            post({ type: 'event', event: 'tsws-data', id: wsId, data: (ev.data as Uint8Array).buffer as ArrayBuffer }, [(ev.data as Uint8Array).buffer as ArrayBuffer]);
+          });
+          ws.addEventListener('close', () => {
+            post({ type: 'event', event: 'tsws-close', id: wsId });
+            (globalThis as any).__tsws?.delete(wsId);
+          });
+        } catch (err: any) {
+          console.error('[worker] createTailscaleWebSocket exception:', err);
+          fail(message.id);
+        }
+        break;
+      }
+      case 'tailscaleWsSend': {
+        const wsId = message.args[0] as number;
+        const ws: any = (globalThis as any).__tsws?.get(wsId);
+        if (ws) ws.send(new Uint8Array(message.data!));
+        respond(message.id);
+        break;
+      }
+      case 'tailscaleWsClose': {
+        const wsId = message.args[0] as number;
+        const ws: any = (globalThis as any).__tsws?.get(wsId);
+        if (ws) ws.close();
+        (globalThis as any).__tsws?.delete(wsId);
+        respond(message.id);
+        break;
+      }
       default: fail(message.id);
     }
   } catch {

@@ -12,6 +12,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -245,6 +246,17 @@ func newIPN(jsConfig js.Value) map[string]any {
 		}),
 		"listenUdp": js.FuncOf(func(this js.Value, args []js.Value) any {
 			return jsIPN.listenUDP(args)
+		}),
+		"createTailscaleWebSocket": js.FuncOf(func(this js.Value, args []js.Value) any {
+			if len(args) < 1 || args[0].Type() != js.TypeString {
+				log.Printf("Usage: createTailscaleWebSocket(url[, resolvedIP])")
+				return nil
+			}
+			resolvedIP := ""
+			if len(args) >= 2 && args[1].Type() == js.TypeString && args[1].String() != "" {
+				resolvedIP = args[1].String()
+			}
+			return jsIPN.createTailscaleWebSocket(args[0].String(), resolvedIP)
 		}),
 	}
 }
@@ -1156,8 +1168,8 @@ func (i *jsIPN) setExitNode(args []js.Value) js.Value {
 		return makePromise(func() (any, error) { return nil, fmt.Errorf("setExitNode expects a non-empty stable node ID") })
 	}
 	var allowLANAccess *bool
-	if len(args) == 2 {
-		if args[1].Type() != js.TypeObject || args[1].IsNull() || (!args[1].Get("allowLANAccess").IsUndefined() && args[1].Get("allowLANAccess").Type() != js.TypeBoolean) {
+	if len(args) == 2 && args[1].Type() == js.TypeObject && !args[1].IsNull() {
+		if !args[1].Get("allowLANAccess").IsUndefined() && args[1].Get("allowLANAccess").Type() != js.TypeBoolean {
 			return makePromise(func() (any, error) { return nil, fmt.Errorf("setExitNode options.allowLANAccess must be a boolean") })
 		}
 		if value := args[1].Get("allowLANAccess"); value.Type() == js.TypeBoolean {
@@ -1167,11 +1179,21 @@ func (i *jsIPN) setExitNode(args []js.Value) js.Value {
 	}
 	id := tailcfg.StableNodeID(args[0].String())
 	return makePromise(func() (any, error) {
-		for _, exitNode := range i.listExitNodes() {
+		exitNodes := i.listExitNodes()
+		log.Printf("setExitNode: looking for id=%q in %d exit nodes", string(id), len(exitNodes))
+		for _, exitNode := range exitNodes {
 			if exitNode.ID == string(id) {
+				log.Printf("setExitNode: found node %q, calling EditPrefs", exitNode.Name)
 				_, err := i.lb.EditPrefs(exitNodePrefs(id, allowLANAccess))
+				if err != nil {
+					log.Printf("setExitNode: EditPrefs error: %v", err)
+				}
 				return nil, err
 			}
+		}
+		log.Printf("setExitNode: exit node %q not found in listExitNodes", string(id))
+		for _, en := range exitNodes {
+			log.Printf("setExitNode: available: id=%q name=%q", en.ID, en.Name)
 		}
 		return nil, fmt.Errorf("exit node %q is not eligible", id)
 	})
@@ -1355,6 +1377,7 @@ func (i *jsIPN) fetch(url string) js.Value {
 		c := &http.Client{
 			Transport: &http.Transport{
 				DialContext: i.dialer.UserDial,
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			},
 		}
 		res, err := c.Get(url)

@@ -30,7 +30,10 @@ type Event =
   | { type: 'event'; event: 'socket-close' | 'socket-error'; socketId: number; message?: string }
   | { type: 'event'; event: 'listener-open'; requestId: number; listenerId: number; udp?: boolean }
   | { type: 'event'; event: 'listener-connection'; listenerId: number; socketId: number; peer: MoonScaleTcpPeer }
-  | { type: 'event'; event: 'listener-message'; listenerId: number; peer: MoonScaleTcpPeer; data: ArrayBuffer };
+  | { type: 'event'; event: 'listener-message'; listenerId: number; peer: MoonScaleTcpPeer; data: ArrayBuffer }
+  | { type: 'event'; event: 'tsws-data'; id: number; data: ArrayBuffer }
+  | { type: 'event'; event: 'tsws-close'; id: number }
+  | { type: 'event'; event: 'tsws-error'; id: number };
 
 type Request =
   | { type: 'start'; config: Omit<RuntimeConfig, 'stateStorage' | 'panicHandler'> & { hasStateStorage: boolean } }
@@ -70,6 +73,7 @@ export class WorkerRuntimeBridge implements RuntimeBridge {
   private callbacks: RuntimeCallbacks | undefined;
   private exitNodes: MoonScaleExitNode[] = [];
   private selection = { id: '', routeAll: false, allowLANAccess: false };
+  private tswsProxies = new Map<number, { proxy: unknown; listeners: Map<string, Set<(...args: unknown[]) => void>>; wsId?: number }>();
   private nextID = 1;
   private closed = false;
   private ready: Promise<void>;
@@ -98,11 +102,65 @@ export class WorkerRuntimeBridge implements RuntimeBridge {
   async setExitNode(id: string, options?: MoonScaleExitNodeOptions): Promise<void> { await this.request('setExitNode', id, options); }
   async clearExitNode(): Promise<void> { await this.request('clearExitNode'); }
 
+  async fetch(url: string): Promise<{ status: number; statusText: string; text(): Promise<string> }> {
+    const result = (await this.request('fetch', url)) as { status: number; statusText: string; body: string };
+    return { status: result.status, statusText: result.statusText, text: async () => result.body };
+  }
+
   dialTcp(host: string, port: number, callbacks: MoonScaleConnectionCallbacks): { close(): void } { return this.dial('dialTcp', host, port, callbacks, false); }
   dialUdp(host: string, port: number, callbacks: MoonScaleConnectionCallbacks): { close(): void } { return this.dial('dialUdp', host, port, callbacks, true); }
 
   listenTcp(host: string, port: number, callbacks: MoonScaleListenerCallbacks): { close(): void } { return this.listen('listenTcp', host, port, callbacks, false); }
   listenUdp(host: string, port: number, callbacks: MoonScaleUdpListenerCallbacks): { close(): void } { return this.listen('listenUdp', host, port, callbacks, true); }
+
+  createTailscaleWebSocket(url: string): unknown {
+    const wsId = this.nextID++;
+    const pendingId = this.nextID++;
+    const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+    const proxy = {
+      readyState: 0,
+      binaryType: 'arraybuffer',
+      send: (data: ArrayBuffer | Uint8Array) => {
+        const buf = data instanceof Uint8Array ? data.slice().buffer : data.slice(0);
+        this.send('tailscaleWsSend', [wsId], undefined, undefined, buf, [buf], pendingId);
+      },
+      close: () => this.send('tailscaleWsClose', [wsId], undefined, undefined, undefined, undefined, pendingId),
+      addEventListener: (type: string, fn: (...args: unknown[]) => void) => {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(fn);
+      },
+    };
+    this.tswsProxies.set(wsId, { proxy, listeners });
+    void this.resolveHostname(url).then((resolvedIP) => {
+      return this.request('createTailscaleWebSocket', url, resolvedIP);
+    }).then((id) => {
+      const entry = this.tswsProxies.get(id as number);
+      if (!entry) return;
+      entry.wsId = id as number;
+      (proxy as any).readyState = 1;
+      for (const fn of entry.listeners.get('open') ?? []) fn({});
+    });
+    return proxy;
+  }
+
+  private async resolveHostname(url: string): Promise<string> {
+    try {
+      const u = new URL(url);
+      const hostname = u.hostname;
+      const resp = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`);
+      const data = await resp.json() as { Answer?: { type: number; data: string }[] };
+      if (data.Answer) {
+        const aRecord = data.Answer.find((a: any) => a.type === 1);
+        if (aRecord) {
+          console.log('[tsws] resolved', hostname, '->', aRecord.data);
+          return aRecord.data;
+        }
+      }
+    } catch (e) {
+      console.warn('[tsws] DNS resolution failed, falling back to hostname:', e);
+    }
+    return '';
+  }
 
   close(): void {
     if (this.closed) return;
@@ -222,6 +280,20 @@ export class WorkerRuntimeBridge implements RuntimeBridge {
     else if (event.event === 'listener-open') { const pending = this.pending.get(event.requestId); if (pending) { this.pending.delete(event.requestId); pending.resolve(event.listenerId); } }
     else if (event.event === 'listener-connection') { const callbacks = this.listenerCallbacks.get(event.listenerId) as MoonScaleListenerCallbacks | undefined; if (!callbacks) return; const connection = new RemoteConnection(this, event.socketId, false); this.connections.set(event.socketId, connection); callbacks.onConnection(connection, event.peer); }
     else if (event.event === 'listener-message') (this.listenerCallbacks.get(event.listenerId) as MoonScaleUdpListenerCallbacks | undefined)?.onMessage(new Uint8Array(event.data), event.peer, new RemoteConnection(this, -1, true));
+    else if (event.event === 'tsws-data') {
+      const entry = this.tswsProxies.get(event.id);
+      if (!entry) return;
+      for (const fn of entry.listeners.get('message') ?? []) fn({ data: new Uint8Array(event.data) });
+    } else if (event.event === 'tsws-close') {
+      const entry = this.tswsProxies.get(event.id);
+      if (!entry) return;
+      this.tswsProxies.delete(event.id);
+      for (const fn of entry.listeners.get('close') ?? []) fn({});
+    } else if (event.event === 'tsws-error') {
+      const entry = this.tswsProxies.get(event.id);
+      if (!entry) return;
+      for (const fn of entry.listeners.get('error') ?? []) fn({});
+    }
   }
 
   private fail(error: Error): void {

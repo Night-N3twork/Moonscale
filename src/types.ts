@@ -83,6 +83,8 @@ export interface RuntimeBridge {
   dialUdp(host: string, port: number, callbacks: MoonScaleConnectionCallbacks): { close(): void };
   listenTcp(host: string, port: number, callbacks: MoonScaleListenerCallbacks): { close(): void };
   listenUdp(host: string, port: number, callbacks: MoonScaleUdpListenerCallbacks): { close(): void };
+  createTailscaleWebSocket(url: string, resolvedIP?: string): unknown;
+  fetch(url: string): Promise<{ status: number; statusText: string; text(): Promise<string> }>;
 }
 
 export interface RuntimeCallbacks {
