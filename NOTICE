@@ -1,0 +1,10 @@
+MoonScale is built to use Tailscale Connect.
+MoonScale is a Tailscale client, not an alternative to Tailscale, and requires
+access to a Tailscale tailnet.
+
+Tailscale is a trademark of Tailscale Inc. MoonScale is not affiliated with or
+endorsed by Tailscale Inc.
+
+The browser runtime includes source derived from Tailscale Connect, Copyright
+(c) Tailscale Inc & contributors, under BSD-3-Clause. The preserved source
+headers and reproducible module metadata are in runtime/wasm and runtime/go.mod.

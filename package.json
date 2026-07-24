@@ -1,0 +1,39 @@
+{
+  "name": "@nightnetwork/moonscale",
+  "version": "1.0.0",
+  "description": "Tailscale Connect client facade for JavaScript runtimes.",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "imports": {
+    "#runtime": "./dist/runtime/runtime.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "node scripts/build-runtime.mjs && tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:integration": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^20.11.0",
+    "typescript": "~5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
