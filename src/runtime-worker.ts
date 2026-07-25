@@ -210,6 +210,9 @@ self.onmessage = (event: MessageEvent<Request>) => {
       case 'logout': bridge.logout(); respond(message.id); break;
       case 'setExitNode': void bridge.setExitNode(message.args[0] as string, message.args[1] as { allowLANAccess?: boolean } | undefined).then(() => { snapshotExitNodes(); respond(message.id); }, (err) => { console.error('[worker] setExitNode failed:', err); post({ type: 'response', id: message.id, error: String(err) }); }); break;
       case 'clearExitNode': void bridge.clearExitNode().then(() => { snapshotExitNodes(); respond(message.id); }, (err) => { console.error('[worker] clearExitNode failed:', err); post({ type: 'response', id: message.id, error: String(err) }); }); break;
+      case 'setFunnel': void bridge.setFunnel(message.args[0] as number, message.args[1] as string).then(() => respond(message.id), (err) => { post({ type: 'response', id: message.id, error: String(err) }); }); break;
+      case 'clearFunnel': void bridge.clearFunnel().then(() => respond(message.id), (err) => { post({ type: 'response', id: message.id, error: String(err) }); }); break;
+      case 'resolveDNS': void bridge.resolveDNS(message.args[0] as string, message.args[1] as number).then((ip) => respond(message.id, ip), (err) => { post({ type: 'response', id: message.id, error: String(err) }); }); break;
       case 'fetch': {
         const url = message.args[0] as string;
         bridge.fetch(url).then((result: any) => {

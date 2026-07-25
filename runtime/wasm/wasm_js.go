@@ -94,6 +94,7 @@ func newIPN(jsConfig js.Value) map[string]any {
 	sys.Set(store)
 	dialer := &tsdial.Dialer{Logf: logf}
 	dialer.SetBus(sys.Bus.Get())
+	sys.Set(dialer)
 	eng, err := wgengine.NewUserspaceEngine(logf, wgengine.Config{
 		Dialer:        dialer,
 		SetSubsystem:  sys.Set,
@@ -161,6 +162,7 @@ func newIPN(jsConfig js.Value) map[string]any {
 		controlURL: controlURL,
 		authKey:    authKey,
 		hostname:   hostname,
+		listeners:  make(map[int]net.Listener),
 	}
 
 	return map[string]any{
@@ -258,6 +260,23 @@ func newIPN(jsConfig js.Value) map[string]any {
 			}
 			return jsIPN.createTailscaleWebSocket(args[0].String(), resolvedIP)
 		}),
+		"setFunnel": js.FuncOf(func(this js.Value, args []js.Value) any {
+			if len(args) != 2 {
+				log.Printf("Usage: setFunnel(port, target)")
+				return nil
+			}
+			return jsIPN.setFunnel(args[0].Int(), args[1].String())
+		}),
+		"clearFunnel": js.FuncOf(func(this js.Value, args []js.Value) any {
+			return jsIPN.clearFunnel()
+		}),
+		"resolveDNS": js.FuncOf(func(this js.Value, args []js.Value) any {
+			if len(args) != 2 {
+				log.Printf("Usage: resolveDNS(host, port)")
+				return nil
+			}
+			return jsIPN.resolveDNS(args[0].String(), args[1].Int())
+		}),
 	}
 }
 
@@ -269,6 +288,7 @@ type jsIPN struct {
 	controlURL string
 	authKey    string
 	hostname   string
+	listeners  map[int]net.Listener // netstack listeners created for non-Funnel serve ports
 }
 
 func (i *jsIPN) dialTCP(args []js.Value) any {
@@ -1213,6 +1233,147 @@ func (i *jsIPN) exitNode() map[string]any {
 		"routeAll":       prefs.RouteAll(),
 		"allowLANAccess": prefs.ExitNodeAllowLANAccess(),
 	}
+}
+
+func (i *jsIPN) setFunnel(port int, target string) js.Value {
+	return makePromise(func() (any, error) {
+		host, portStr, err := net.SplitHostPort(target)
+		if err != nil {
+			return nil, fmt.Errorf("invalid target %q: %w", target, err)
+		}
+
+		nm := i.lb.NetMapWithPeers()
+		if nm == nil {
+			return nil, fmt.Errorf("no netmap available")
+		}
+
+		// Resolve loopback to the node's own Tailscale IP so dials route
+		// through netstack (not the OS dialer) to reach bridge listeners.
+		if host == "127.0.0.1" || host == "localhost" {
+			for _, pfx := range nm.GetAddresses().All() {
+				if pfx.IsSingleIP() && pfx.Addr().Is4() {
+					host = pfx.Addr().String()
+					break
+				}
+			}
+			resolvedTarget := net.JoinHostPort(host, portStr)
+			log.Printf("setFunnel: resolved loopback -> %s", resolvedTarget)
+			target = resolvedTarget
+		}
+
+		resolvedTarget := target
+		if net.ParseIP(host) == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			conn, err := i.dialer.UserDial(ctx, "tcp", net.JoinHostPort(host, portStr))
+			if err != nil {
+				return nil, fmt.Errorf("cannot resolve %q: %w", host, err)
+			}
+			resolvedIP := conn.RemoteAddr().(*net.TCPAddr).IP.String()
+			conn.Close()
+			resolvedTarget = net.JoinHostPort(resolvedIP, portStr)
+			log.Printf("setFunnel: resolved %q -> %s", target, resolvedTarget)
+		}
+
+		hostname := strings.TrimSuffix(nm.SelfName(), ".")
+
+		// Funnel only works on 443/8443 via the serve proxy.
+		// For all other ports, register a netstack listener directly
+		// (avoids the serve proxy's SystemDial which can't reach netstack).
+		if port == 443 || port == 8443 {
+			config := &ipn.ServeConfig{
+				TCP: map[uint16]*ipn.TCPPortHandler{
+					uint16(port): {
+						TCPForward: resolvedTarget,
+					},
+				},
+				AllowFunnel: map[ipn.HostPort]bool{
+					ipn.HostPort(fmt.Sprintf("%s:%d", hostname, port)): true,
+				},
+			}
+			if err := i.lb.SetServeConfig(config, ""); err != nil {
+				return nil, err
+			}
+			log.Printf("Funnel enabled: %s -> %s", hostname, resolvedTarget)
+			return nil, nil
+		}
+
+		// Non-Funnel port: register a netstack TCP listener that pipes
+		// incoming connections to the target via UserDial (through netstack).
+		if existing, ok := i.listeners[port]; ok {
+			existing.Close()
+		}
+		listener, err := i.ns.ListenTCP("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+		if err != nil {
+			return nil, fmt.Errorf("listen on port %d: %w", port, err)
+		}
+		i.listeners[port] = listener
+		log.Printf("Serve enabled: port %d -> %s (via netstack listener)", port, resolvedTarget)
+
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				go func(incoming net.Conn) {
+					defer incoming.Close()
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					outgoing, err := i.dialer.UserDial(ctx, "tcp", resolvedTarget)
+					if err != nil {
+						log.Printf("pipe %d: dial target %s: %v", port, resolvedTarget, err)
+						return
+					}
+					defer outgoing.Close()
+					pipeConns(incoming, outgoing)
+				}(conn)
+			}
+		}()
+		return nil, nil
+	})
+}
+
+func (i *jsIPN) clearFunnel() js.Value {
+	return makePromise(func() (any, error) {
+		// Close any netstack listeners for non-Funnel serve ports.
+		for port, l := range i.listeners {
+			l.Close()
+			delete(i.listeners, port)
+			log.Printf("Serve disabled: port %d", port)
+		}
+		if err := i.lb.SetServeConfig(&ipn.ServeConfig{}, ""); err != nil {
+			return nil, err
+		}
+		log.Printf("Funnel disabled")
+		return nil, nil
+	})
+}
+
+func pipeConns(a, b net.Conn) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { io.Copy(a, b); a.Close(); b.Close(); wg.Done() }()
+	go func() { io.Copy(b, a); b.Close(); a.Close(); wg.Done() }()
+	wg.Wait()
+}
+
+func (i *jsIPN) resolveDNS(host string, port int) js.Value {
+	return makePromise(func() (any, error) {
+		if net.ParseIP(host) != nil {
+			return host, nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		conn, err := i.dialer.UserDial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve %q: %w", host, err)
+		}
+		defer conn.Close()
+		resolvedIP := conn.RemoteAddr().(*net.TCPAddr).IP.String()
+		log.Printf("resolveDNS: %q -> %s", host, resolvedIP)
+		return resolvedIP, nil
+	})
 }
 
 func (i *jsIPN) ssh(host, username string, termConfig js.Value) map[string]any {

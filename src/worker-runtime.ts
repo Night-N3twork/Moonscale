@@ -107,6 +107,13 @@ export class WorkerRuntimeBridge implements RuntimeBridge {
     return { status: result.status, statusText: result.statusText, text: async () => result.body };
   }
 
+  async setFunnel(port: number, target: string): Promise<void> { await this.request('setFunnel', port, target); }
+  async clearFunnel(): Promise<void> { await this.request('clearFunnel'); }
+
+  async resolveDNS(host: string, port: number): Promise<string> {
+    return (await this.request('resolveDNS', host, port)) as string;
+  }
+
   dialTcp(host: string, port: number, callbacks: MoonScaleConnectionCallbacks): { close(): void } { return this.dial('dialTcp', host, port, callbacks, false); }
   dialUdp(host: string, port: number, callbacks: MoonScaleConnectionCallbacks): { close(): void } { return this.dial('dialUdp', host, port, callbacks, true); }
 

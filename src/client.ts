@@ -157,6 +157,21 @@ export class MoonScaleClient {
     return this.bridge.fetch(url);
   }
 
+  async setFunnel(port: number, target: string): Promise<void> {
+    if (this.closed) throw new Error('MoonScale client is closed');
+    return this.bridge.setFunnel(port, target);
+  }
+
+  async clearFunnel(): Promise<void> {
+    if (this.closed) throw new Error('MoonScale client is closed');
+    return this.bridge.clearFunnel();
+  }
+
+  async resolveDNS(host: string, port: number): Promise<string> {
+    if (this.closed) throw new Error('MoonScale client is closed');
+    return this.bridge.resolveDNS(host, port);
+  }
+
   createTailscaleWebSocket(url: string): unknown {
     if (this.closed) throw new Error('MoonScale client is closed');
     return this.bridge.createTailscaleWebSocket(url);

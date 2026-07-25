@@ -85,6 +85,9 @@ export interface RuntimeBridge {
   listenUdp(host: string, port: number, callbacks: MoonScaleUdpListenerCallbacks): { close(): void };
   createTailscaleWebSocket(url: string, resolvedIP?: string): unknown;
   fetch(url: string): Promise<{ status: number; statusText: string; text(): Promise<string> }>;
+  setFunnel(port: number, target: string): Promise<void>;
+  clearFunnel(): Promise<void>;
+  resolveDNS(host: string, port: number): Promise<string>;
 }
 
 export interface RuntimeCallbacks {
