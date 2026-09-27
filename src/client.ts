@@ -104,6 +104,7 @@ export class MoonScaleClient {
   private readonly sockets = new Set<SocketAdapter>();
   private readonly pendingDials = new Set<() => void>();
   private readonly listeners = new Set<() => void>();
+  private readonly authorizationURLListeners = new Set<(url: string) => void>();
   private _state: MoonScaleState = 'NoState';
   private _netmap: MoonScaleNetMap | null = null;
   private closed = false;
@@ -118,7 +119,7 @@ export class MoonScaleClient {
     bridge.run({
       notifyState: (state) => client.setState(state),
       notifyNetMap: (netmap) => client.setNetmap(netmap),
-      notifyBrowseToURL: (url) => client.options.onAuthURL?.(url),
+      notifyBrowseToURL: (url) => client.notifyAuthorizationURL(url),
       notifyPanicRecover: (message) => client.emitError(new Error(message)),
       notifyRunning: () => client.options.onState?.('Running'),
     });
@@ -130,6 +131,11 @@ export class MoonScaleClient {
   /** @deprecated Use netMap. */
   get netmap(): MoonScaleNetMap | null { return this.netMap; }
   get addresses(): readonly string[] { return this._netmap?.self.addresses.slice() ?? []; }
+
+  onAuthorizationURL(listener: (url: string) => void): () => void {
+    this.authorizationURLListeners.add(listener);
+    return () => this.authorizationURLListeners.delete(listener);
+  }
 
   login(): void { if (!this.closed) this.bridge.login(); }
   logout(): void { if (!this.closed) this.bridge.logout(); }
@@ -288,6 +294,7 @@ export class MoonScaleClient {
     for (const close of [...this.listeners]) close();
     for (const cancel of [...this.pendingDials]) cancel();
     for (const socket of [...this.sockets]) socket.close();
+    this.authorizationURLListeners.clear();
     this.bridge.close?.();
   }
 
@@ -350,5 +357,10 @@ export class MoonScaleClient {
 
   private emitError(error: Error): void {
     if (!this.closed) this.options.onError?.(error);
+  }
+
+  private notifyAuthorizationURL(url: string): void {
+    this.options.onAuthURL?.(url);
+    for (const listener of this.authorizationURLListeners) listener(url);
   }
 }

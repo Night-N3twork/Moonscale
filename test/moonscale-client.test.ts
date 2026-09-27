@@ -16,6 +16,10 @@ function makeBridge(): RuntimeBridge {
     clearExitNode: vi.fn(() => Promise.resolve()),
     exitNode: vi.fn(),
     createTailscaleWebSocket: vi.fn(),
+    fetch: vi.fn(),
+    setFunnel: vi.fn(() => Promise.resolve()),
+    clearFunnel: vi.fn(() => Promise.resolve()),
+    resolveDNS: vi.fn(),
   };
 }
 
@@ -36,6 +40,31 @@ describe('MoonScaleClient', () => {
     expect(bridge.login).not.toHaveBeenCalled();
     client.login();
     expect(bridge.login).toHaveBeenCalledOnce();
+  });
+
+  it('notifies authorization URL subscribers until they unsubscribe', async () => {
+    const bridge = makeBridge();
+    const onAuthURL = vi.fn();
+    const onAuthorizationURL = vi.fn();
+    const otherOnAuthorizationURL = vi.fn();
+    const client = await MoonScaleClient.create({ onAuthURL }, async () => runtimeFor(bridge));
+    const unsubscribe = client.onAuthorizationURL(onAuthorizationURL);
+    client.onAuthorizationURL(otherOnAuthorizationURL);
+    const callbacks = vi.mocked(bridge.run).mock.calls[0][0];
+
+    callbacks.notifyBrowseToURL('https://login.tailscale.com/a/123');
+
+    expect(onAuthURL).toHaveBeenCalledWith('https://login.tailscale.com/a/123');
+    expect(onAuthorizationURL).toHaveBeenCalledWith('https://login.tailscale.com/a/123');
+    expect(otherOnAuthorizationURL).toHaveBeenCalledWith('https://login.tailscale.com/a/123');
+
+    unsubscribe();
+    callbacks.notifyBrowseToURL('https://login.tailscale.com/a/456');
+
+    expect(onAuthURL).toHaveBeenCalledWith('https://login.tailscale.com/a/456');
+    expect(onAuthorizationURL).toHaveBeenCalledOnce();
+    expect(otherOnAuthorizationURL).toHaveBeenNthCalledWith(1, 'https://login.tailscale.com/a/123');
+    expect(otherOnAuthorizationURL).toHaveBeenNthCalledWith(2, 'https://login.tailscale.com/a/456');
   });
 
   it('passes an auth key to the runtime without retaining it', async () => {

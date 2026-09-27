@@ -48,6 +48,8 @@ import (
 // ControlURL defines the URL to be used for connection to Control.
 var ControlURL = ipn.DefaultControlURL
 
+const userDialTimeout = 30 * time.Second
+
 func main() {
 	js.Global().Set("newIPN", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if len(args) != 1 {
@@ -296,7 +298,7 @@ func (i *jsIPN) dialTCP(args []js.Value) any {
 	if err != nil {
 		return newJSTerminalHandle(callbacks, err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), userDialTimeout)
 	pending := newJSPendingDial(cancel, callbacks)
 	go func() {
 		conn, err := i.dialer.UserDial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))

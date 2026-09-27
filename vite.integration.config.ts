@@ -2,10 +2,12 @@ import { readFile, stat } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
-const runtimeDir = resolve('dist/runtime');
+const moonScaleDist = resolve(process.env.MOONSCALE_INSTALLED_PACKAGE_ROOT ?? '.', 'dist');
+const runtimeDir = resolve(moonScaleDist, 'runtime');
 
 export const integrationAssets = {
-  moonScaleDist: resolve('dist'),
+  moonScaleDist,
+  lunaSSHDir: resolve('../LunaSSH/dist'),
   runtimeDir,
   runtimeJS: resolve(runtimeDir, 'runtime.js'),
   wasm: resolve(runtimeDir, 'main.wasm'),
@@ -13,7 +15,7 @@ export const integrationAssets = {
 
 function contentType(file: string): string {
   if (file.endsWith('.wasm')) return 'application/wasm';
-  if (file.endsWith('.js')) return 'text/javascript';
+  if (file.endsWith('.js') || file.endsWith('.mjs')) return 'text/javascript';
   if (file.endsWith('.map')) return 'application/json';
   return 'application/octet-stream';
 }
@@ -46,6 +48,7 @@ export default defineConfig({
     name: 'moonscale-integration-assets',
     configureServer(server) {
       server.middlewares.use('/moonscale', staticFiles(integrationAssets.moonScaleDist));
+      server.middlewares.use('/lunassh', staticFiles(integrationAssets.lunaSSHDir));
       server.middlewares.use('/runtime', staticFiles(integrationAssets.runtimeDir));
       server.middlewares.use((_request, response) => {
         response.setHeader('Content-Type', 'text/html');

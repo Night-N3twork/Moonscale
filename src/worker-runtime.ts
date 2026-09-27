@@ -27,7 +27,7 @@ type Event =
   | { type: 'event'; event: 'exit-node'; value: { id: string; routeAll: boolean; allowLANAccess: boolean } }
   | { type: 'event'; event: 'connection-open'; requestId: number; socketId: number; udp?: boolean }
   | { type: 'event'; event: 'socket-data'; socketId: number; data: ArrayBuffer }
-  | { type: 'event'; event: 'socket-close' | 'socket-error'; socketId: number; message?: string }
+  | { type: 'event'; event: 'socket-close' | 'socket-error'; socketId: number; requestId?: number; message?: string }
   | { type: 'event'; event: 'listener-open'; requestId: number; listenerId: number; udp?: boolean }
   | { type: 'event'; event: 'listener-connection'; listenerId: number; socketId: number; peer: MoonScaleTcpPeer }
   | { type: 'event'; event: 'listener-message'; listenerId: number; peer: MoonScaleTcpPeer; data: ArrayBuffer }
@@ -73,7 +73,7 @@ export class WorkerRuntimeBridge implements RuntimeBridge {
   private callbacks: RuntimeCallbacks | undefined;
   private exitNodes: MoonScaleExitNode[] = [];
   private selection = { id: '', routeAll: false, allowLANAccess: false };
-  private tswsProxies = new Map<number, { proxy: unknown; listeners: Map<string, Set<(...args: unknown[]) => void>>; wsId?: number }>();
+  private tswsProxies = new Map<number, { proxy: unknown; listeners: Map<string, Set<(...args: unknown[]) => void>>; wsId?: number; pending: (() => void)[] }>();
   private nextID = 1;
   private closed = false;
   private ready: Promise<void>;
@@ -121,31 +121,47 @@ export class WorkerRuntimeBridge implements RuntimeBridge {
   listenUdp(host: string, port: number, callbacks: MoonScaleUdpListenerCallbacks): { close(): void } { return this.listen('listenUdp', host, port, callbacks, true); }
 
   createTailscaleWebSocket(url: string): unknown {
-    const wsId = this.nextID++;
-    const pendingId = this.nextID++;
+    const pageId = this.nextID++;
     const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+    const entry = { proxy: undefined as unknown, listeners, wsId: undefined as number | undefined, pending: [] as (() => void)[] };
+    const sendWhenOpen = (send: (wsId: number) => void) => {
+      if (entry.wsId === undefined) entry.pending.push(() => send(entry.wsId!));
+      else send(entry.wsId);
+    };
     const proxy = {
       readyState: 0,
       binaryType: 'arraybuffer',
       send: (data: ArrayBuffer | Uint8Array) => {
         const buf = data instanceof Uint8Array ? data.slice().buffer : data.slice(0);
-        this.send('tailscaleWsSend', [wsId], undefined, undefined, buf, [buf], pendingId);
+        sendWhenOpen((wsId) => this.send('tailscaleWsSend', [wsId], undefined, undefined, buf, [buf]));
       },
-      close: () => this.send('tailscaleWsClose', [wsId], undefined, undefined, undefined, undefined, pendingId),
+      close: () => sendWhenOpen((wsId) => this.send('tailscaleWsClose', [wsId])),
       addEventListener: (type: string, fn: (...args: unknown[]) => void) => {
         if (!listeners.has(type)) listeners.set(type, new Set());
         listeners.get(type)!.add(fn);
       },
     };
-    this.tswsProxies.set(wsId, { proxy, listeners });
+    entry.proxy = proxy;
+    this.tswsProxies.set(pageId, entry);
     void this.resolveHostname(url).then((resolvedIP) => {
       return this.request('createTailscaleWebSocket', url, resolvedIP);
     }).then((id) => {
-      const entry = this.tswsProxies.get(id as number);
+      const entry = this.tswsProxies.get(pageId);
       if (!entry) return;
+      this.tswsProxies.delete(pageId);
       entry.wsId = id as number;
+      this.tswsProxies.set(entry.wsId, entry);
       (proxy as any).readyState = 1;
+      for (const send of entry.pending.splice(0)) send();
       for (const fn of entry.listeners.get('open') ?? []) fn({});
+    }).catch((error: unknown) => {
+      const entry = this.tswsProxies.get(pageId);
+      if (!entry) return;
+      this.tswsProxies.delete(pageId);
+      (entry.proxy as { readyState: number }).readyState = 3;
+      const message = error instanceof Error ? error.message : String(error);
+      for (const fn of entry.listeners.get('error') ?? []) fn({ message });
+      for (const fn of entry.listeners.get('close') ?? []) fn({});
     });
     return proxy;
   }
@@ -282,8 +298,26 @@ export class WorkerRuntimeBridge implements RuntimeBridge {
     else if (event.event === 'exit-node') this.selection = event.value;
     else if (event.event === 'connection-open') { const pending = this.pending.get(event.requestId); if (pending) { this.pending.delete(event.requestId); pending.resolve(event.socketId); } }
     else if (event.event === 'socket-data') this.connections.get(event.socketId)?.data(event.data);
-    else if (event.event === 'socket-close') { this.connections.get(event.socketId)?.closeFromWorker(event.message); this.connections.delete(event.socketId); }
-    else if (event.event === 'socket-error') this.connections.get(event.socketId)?.error(event.message ?? 'MoonScale socket failed');
+    else if (event.event === 'socket-close') {
+      const pending = event.requestId === undefined ? undefined : this.pending.get(event.requestId);
+      if (pending) {
+        this.pending.delete(event.requestId!);
+        pending.reject(new Error(event.message ?? 'MoonScale connection closed'));
+      } else {
+        this.connections.get(event.socketId)?.closeFromWorker(event.message);
+        this.connections.delete(event.socketId);
+      }
+    }
+    else if (event.event === 'socket-error') {
+      const message = event.message ?? 'MoonScale socket failed';
+      const pending = event.requestId === undefined ? undefined : this.pending.get(event.requestId);
+      if (pending) {
+        this.pending.delete(event.requestId!);
+        pending.reject(new Error(message));
+      } else {
+        this.connections.get(event.socketId)?.error(message);
+      }
+    }
     else if (event.event === 'listener-open') { const pending = this.pending.get(event.requestId); if (pending) { this.pending.delete(event.requestId); pending.resolve(event.listenerId); } }
     else if (event.event === 'listener-connection') { const callbacks = this.listenerCallbacks.get(event.listenerId) as MoonScaleListenerCallbacks | undefined; if (!callbacks) return; const connection = new RemoteConnection(this, event.socketId, false); this.connections.set(event.socketId, connection); callbacks.onConnection(connection, event.peer); }
     else if (event.event === 'listener-message') (this.listenerCallbacks.get(event.listenerId) as MoonScaleUdpListenerCallbacks | undefined)?.onMessage(new Uint8Array(event.data), event.peer, new RemoteConnection(this, -1, true));

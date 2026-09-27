@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"syscall/js"
-	"time"
 )
 
 type tsWebSocket struct {
@@ -78,7 +77,7 @@ func (ws *tsWebSocket) connect(i *jsIPN, rawURL string, resolvedIP string) {
 		dialAddr = resolvedIP
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), userDialTimeout)
 	defer cancel()
 
 	log.Printf("tsWebSocket: dialing %s (host=%s resolved=%s)", net.JoinHostPort(dialAddr, port), host, dialAddr)

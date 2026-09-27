@@ -24,6 +24,7 @@ let nextListenerID = 1;
 let nextStorageID = 1;
 const sockets = new Map<number, RuntimeConnection>();
 const listeners = new Map<number, { close(): void }>();
+const pendingDials = new Map<number, { close(): void } | undefined>();
 const storageWaiters = new Map<number, StorageWaiter>();
 
 function post(message: unknown, transfer?: Transferable[]): void {
@@ -88,6 +89,7 @@ function runtimeCallbacks(): RuntimeCallbacks {
 function connectionCallbacks(requestId: number, socketId: number, udp: boolean): MoonScaleConnectionCallbacks {
   return {
     onOpen(connection) {
+      pendingDials.delete(requestId);
       sockets.set(socketId, connection);
       post({ type: 'event', event: 'connection-open', requestId, socketId, udp });
     },
@@ -96,11 +98,13 @@ function connectionCallbacks(requestId: number, socketId: number, udp: boolean):
       post({ type: 'event', event: 'socket-data', socketId, data: buffer }, [buffer]);
     },
     onClose(message) {
+      pendingDials.delete(requestId);
       sockets.delete(socketId);
-      post({ type: 'event', event: 'socket-close', socketId, message });
+      post({ type: 'event', event: 'socket-close', requestId, socketId, message });
     },
     onError(message) {
-      post({ type: 'event', event: 'socket-error', socketId, message });
+      pendingDials.delete(requestId);
+      post({ type: 'event', event: 'socket-error', requestId, socketId, message });
     },
   };
 }
@@ -131,8 +135,9 @@ function dial(id: number, udp: boolean, host: string, port: number): void {
   if (!bridge) return fail(id);
   const socketId = nextSocketID++;
   const callbacks = connectionCallbacks(id, socketId, udp);
-  if (udp) bridge.dialUdp(host, port, callbacks);
-  else bridge.dialTcp(host, port, callbacks);
+  pendingDials.set(id, undefined);
+  const handle = udp ? bridge.dialUdp(host, port, callbacks) : bridge.dialTcp(host, port, callbacks);
+  if (pendingDials.has(id)) pendingDials.set(id, handle);
 }
 
 function listen(id: number, udp: boolean, host: string, port: number): void {
@@ -177,8 +182,10 @@ function shutdown(): void {
   closed = true;
   for (const socket of sockets.values()) socket.close();
   for (const listener of listeners.values()) listener.close();
+  for (const dial of pendingDials.values()) dial?.close();
   sockets.clear();
   listeners.clear();
+  pendingDials.clear();
   bridge?.close?.();
   bridge = undefined;
   self.close();
@@ -231,7 +238,13 @@ self.onmessage = (event: MessageEvent<Request>) => {
       case 'socketSendTo': (sockets.get(message.socketId!) as RuntimeUdpConnection | undefined)?.sendTo(new Uint8Array(message.data!), message.args[0] as string, message.args[1] as number); respond(message.id); break;
       case 'socketClose': sockets.get(message.socketId!)?.close(); sockets.delete(message.socketId!); respond(message.id); break;
       case 'listenerClose': listeners.get(message.listenerId!)?.close(); listeners.delete(message.listenerId!); respond(message.id); break;
-      case 'cancel': respond(message.id); break;
+      case 'cancel': {
+        const dial = pendingDials.get(message.args[0] as number);
+        dial?.close();
+        pendingDials.delete(message.args[0] as number);
+        respond(message.id);
+        break;
+      }
       case 'createTailscaleWebSocket': {
         const url = message.args[0] as string;
         const resolvedIP = message.args[1] as string | undefined;

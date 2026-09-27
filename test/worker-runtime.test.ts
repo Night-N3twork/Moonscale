@@ -5,6 +5,10 @@ type WorkerMessage = { type: string; id?: number; method?: string; args?: unknow
 
 class SimulatedRuntimeWorker {
   static instances: SimulatedRuntimeWorker[] = [];
+  static stallDial = false;
+  static closeDialBeforeOpen = false;
+  static closeDialAfterOpen = false;
+  static rejectTailscaleWebSocketCreate = false;
   onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   readonly posted: WorkerMessage[] = [];
@@ -28,8 +32,30 @@ class SimulatedRuntimeWorker {
     }
     if (message.method === 'dialTcp') {
       queueMicrotask(() => {
+        if (SimulatedRuntimeWorker.stallDial) {
+          this.emit({ type: 'event', event: 'socket-error', requestId: message.id, socketId: 7, message: 'context deadline exceeded' });
+          return;
+        }
+        if (SimulatedRuntimeWorker.closeDialBeforeOpen) {
+          this.emit({ type: 'event', event: 'socket-close', requestId: message.id, socketId: 7, message: 'connection refused' });
+          return;
+        }
         this.emit({ type: 'event', event: 'connection-open', requestId: message.id, socketId: 7 });
         setTimeout(() => this.emit({ type: 'event', event: 'socket-data', socketId: 7, data: new Uint8Array([8, 9]).buffer }), 0);
+        if (SimulatedRuntimeWorker.closeDialAfterOpen) {
+          setTimeout(() => this.emit({ type: 'event', event: 'socket-close', requestId: message.id, socketId: 7, message: 'remote closed' }), 0);
+        }
+      });
+      return;
+    }
+    if (message.method === 'createTailscaleWebSocket') {
+      queueMicrotask(() => {
+        if (SimulatedRuntimeWorker.rejectTailscaleWebSocketCreate) {
+          this.emit({ type: 'response', id: message.id, error: 'relay create rejected' });
+          return;
+        }
+        this.emit({ type: 'response', id: message.id, value: 99 });
+        setTimeout(() => this.emit({ type: 'event', event: 'tsws-data', id: 99, data: new Uint8Array([4, 5]).buffer }), 0);
       });
       return;
     }
@@ -57,6 +83,10 @@ describe('browser worker runtime', () => {
     Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow });
     console.log = originalConsoleLog;
     SimulatedRuntimeWorker.instances.length = 0;
+    SimulatedRuntimeWorker.stallDial = false;
+    SimulatedRuntimeWorker.closeDialBeforeOpen = false;
+    SimulatedRuntimeWorker.closeDialAfterOpen = false;
+    SimulatedRuntimeWorker.rejectTailscaleWebSocketCreate = false;
   });
 
   it('keeps the page responsive while the worker runs post-auth work without logging credentials', async () => {
@@ -103,5 +133,90 @@ describe('browser worker runtime', () => {
 
     await client.close();
     expect(worker.posted.some((message) => message.method === 'socketClose' && message.socketId === 7)).toBe(true);
+  });
+
+  it('rejects a stalled TCP dial when the runtime reports its deadline error', async () => {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: globalThis });
+    Object.defineProperty(globalThis, 'Worker', { configurable: true, value: SimulatedRuntimeWorker });
+    SimulatedRuntimeWorker.stallDial = true;
+    const client = await MoonScaleClient.create();
+
+    await expect(client.dialTcp('100.64.0.2', 443)).rejects.toThrow('context deadline exceeded');
+
+    await client.close();
+  });
+
+  it('rejects a TCP dial when the worker closes it before opening', async () => {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: globalThis });
+    Object.defineProperty(globalThis, 'Worker', { configurable: true, value: SimulatedRuntimeWorker });
+    SimulatedRuntimeWorker.closeDialBeforeOpen = true;
+    const client = await MoonScaleClient.create();
+
+    await expect(client.dialTcp('100.64.0.2', 443)).rejects.toThrow('connection refused');
+
+    await client.close();
+  });
+
+  it('keeps an opened TCP socket lifecycle bound to its socket ID when the worker closes it', async () => {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: globalThis });
+    Object.defineProperty(globalThis, 'Worker', { configurable: true, value: SimulatedRuntimeWorker });
+    SimulatedRuntimeWorker.closeDialAfterOpen = true;
+    const client = await MoonScaleClient.create();
+    const socket = await client.dialTcp('100.64.0.2', 443);
+    const onClose = vi.fn();
+    socket.on('close', onClose);
+
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledWith('remote closed'));
+
+    const worker = SimulatedRuntimeWorker.instances[0];
+    socket.send(new Uint8Array([1]));
+    expect(worker.posted.some((message) => message.method === 'socketWrite' && message.socketId === 7)).toBe(false);
+    await client.close();
+  });
+
+  it('binds WebSocket lifecycle to the worker ID after opening', async () => {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: globalThis });
+    Object.defineProperty(globalThis, 'Worker', { configurable: true, value: SimulatedRuntimeWorker });
+    const fetch = vi.fn(async () => ({ json: async () => ({ Answer: [{ type: 1, data: '100.64.0.2' }] }) }));
+    vi.stubGlobal('fetch', fetch);
+    const client = await MoonScaleClient.create();
+    const socket = client.createTailscaleWebSocket('ws://service.example.ts.net') as {
+      send(data: Uint8Array): void;
+      close(): void;
+      addEventListener(type: string, listener: (event: { data: Uint8Array }) => void): void;
+    };
+    const onMessage = vi.fn();
+    socket.addEventListener('message', onMessage);
+    socket.send(new Uint8Array([1, 2, 3]));
+    socket.close();
+
+    const worker = SimulatedRuntimeWorker.instances[0];
+    await vi.waitFor(() => {
+      expect(worker.posted.some((message) => message.method === 'tailscaleWsSend' && message.args?.[0] === 99)).toBe(true);
+      expect(worker.posted.some((message) => message.method === 'tailscaleWsClose' && message.args?.[0] === 99)).toBe(true);
+      expect(onMessage).toHaveBeenCalledWith({ data: new Uint8Array([4, 5]) });
+    });
+
+    await client.close();
+  });
+
+  it('closes a WebSocket proxy when the worker rejects its creation request', async () => {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: globalThis });
+    Object.defineProperty(globalThis, 'Worker', { configurable: true, value: SimulatedRuntimeWorker });
+    SimulatedRuntimeWorker.rejectTailscaleWebSocketCreate = true;
+    vi.stubGlobal('fetch', vi.fn(async () => ({ json: async () => ({ Answer: [{ type: 1, data: '100.64.0.2' }] }) })));
+    const client = await MoonScaleClient.create();
+    const socket = client.createTailscaleWebSocket('ws://service.example.ts.net') as {
+      readyState: number;
+      addEventListener(type: string, listener: (event: { message?: string }) => void): void;
+    };
+    const events: string[] = [];
+    socket.addEventListener('error', (event) => events.push(`error:${event.message}`));
+    socket.addEventListener('close', () => events.push('close'));
+
+    await vi.waitFor(() => expect(events).toEqual(['error:relay create rejected', 'close']));
+    expect(socket.readyState).toBe(3);
+
+    await client.close();
   });
 });

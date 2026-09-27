@@ -266,6 +266,7 @@ export async function runTailnet(page: Page, baseURL: string, authKey: string, e
                 }
               },
             });
+            client.login();
             clientCreated = true;
             clientCreateMS = elapsed(clientCreateStartedAt);
           } catch (error) {

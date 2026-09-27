@@ -126,33 +126,61 @@ The bridge dynamically discovers the target host:port from `MoonbeamRelay.listen
 
 ## Local Tailnet Validation
 
-The real-tailnet tests run in Chromium through Playwright and are skipped unless
+The credential-backed real-tailnet tests run in Chromium through Playwright and are skipped unless
 `TAILSCALE_INTEGRATION=1` and `TAILSCALE_TEST_AUTH_KEY` are set. They
 authenticate a disposable device and assert that MoonScale reports a tailnet
 address. Install Chromium once for local runs with `npx playwright install
 chromium`:
 
 ```sh
-TAILSCALE_INTEGRATION=1 TAILSCALE_TEST_AUTH_KEY=tskey-auth-... npm run test:integration
+TAILSCALE_INTEGRATION=1 npm run test:integration
 ```
 
-Set `TAILSCALE_TEST_EXIT_NODE_ID` as well to run the separate exit-node test.
+Set `TAILSCALE_TEST_AUTH_KEY` securely in your shell before running the command;
+do not paste it into the command or store it in a file. Build LunaSSH first
+(`cd ../LunaSSH && npm run build`): the browser fixture serves its built
+`index.mjs`, `lunassh.wasm`, and `wasm_exec.js` alongside MoonScale's runtime.
+The SSH probe additionally requires `TAILSCALE_TEST_SSH_USER=root` and
+`TAILSCALE_TEST_TCP_TARGET=caeast1`; it uses MoonScale's exported
+`MoonScaleTransportProvider` to dial through the tailnet. It probes the SSH host
+key and root authorization outcome: check-mode must return a
+`login.tailscale.com` URL banner, or an auto-accept tailnet must open a root
+session. Timeout and authentication rejection fail the probe. Set
+`TAILSCALE_TEST_EXIT_NODE_ID` as well to run the separate exit-node test.
 It verifies only that exact eligible node and clears the selection during
 cleanup. Never put either value in a file or npm package.
 
-For a local package check, build and pack MoonScale, then install it alongside
+For a local package check, pack MoonScale (normal `npm pack` runs `prepack`,
+which rebuilds Go/WASM and TypeScript), then install it alongside
 Moonbeam 1.1.0 in the demo:
 
 ```sh
 mkdir -p /tmp/nightnetwork-pack
-npm run build && npm pack --pack-destination /tmp/nightnetwork-pack
+npm pack --pack-destination /tmp/nightnetwork-pack
 (cd ../MoonBeam/.worktrees/tailscale-integration && npm run build && npm pack --pack-destination /tmp/nightnetwork-pack)
 (cd ../night-network-demo && npm install --no-save /tmp/nightnetwork-pack/*.tgz)
 ```
 
+`npm test` builds and runs the unit suite first, then runs `npm run test:package`
+separately so its `prepack` rebuild cannot race tests reading `dist`. Install
+Chromium with `npx playwright install chromium` before this release check.
+The package-contract test poisons generated `dist`, packs and installs a fresh
+tarball in a temporary consumer, checks exports, declarations, runtime WASM,
+and credential markers, then serves that installed package to Chromium and
+verifies `NeedsLogin` without a key. It removes the temporary consumer afterward.
 `npm run test:packages` from the demo performs the corresponding packed-import
-check and rejects archives containing `.env` files or Tailscale test-variable
-names.
+check. By default the Playwright integration fixture serves MoonScale's local
+`dist`; setting `MOONSCALE_INSTALLED_PACKAGE_ROOT` to an installed MoonScale
+package directory makes it serve that package's `dist` and runtime instead.
+The package-contract test sets this only for its own temporary consumer and
+restores the environment after the browser smoke check.
+
+Prepublication source-hygiene gate: `runtime/main.wasm` is a pre-existing
+tracked ~38 MB repository artifact. Review and resolve its tracked-source
+status separately before publication; do not remove it from the index as part
+of the SSH test fix. It is not a tarball security blocker: `prepack` rebuilds
+from source, deletes `dist` first, and the package `files` list excludes
+`runtime/main.wasm` (the packed runtime is `dist/runtime/main.wasm`).
 
 ## License and Attribution
 
